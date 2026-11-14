@@ -1,18 +1,23 @@
 /*
 * AI 节点质量检测（Quantumult X · event-interaction 脚本）
-* 版本：v2.1（2026-11-14）
+* 版本：v2.2（2026-11-14）
 *
-* 说明：v2.0 试过用 opts.policy 在一次运行里串行测四个地区，真机上跑不通，已回滚该做法。
-* v2.1 = v1.1 已验证可用的检测路径 + 更详细的报告（状态码、延迟采样、AS 号）。
+* v2.2 修复（长按入口报「无有效内容」的真原因）：
+* 圈X 的长按（UIAction）入口要求脚本最后用 $done({title, htmlMessage}) 把报告
+* 作为“内容”交回，圈X 才有东西可弹；只 $notify + $done() 会被判「无有效内容」。
+* 本版照「流媒体解锁查询」（KOP-XIAO）验证过的做法改：
+* 1) 长按运行时，把 $environment.params 作为 opts.policy 传给每条探针请求，
+*    探针才真正走被长按的那个节点/策略组；
+* 2) 结束时同时 $notify（请求列表里看日志）和 $done({title, htmlMessage})
+*    （长按时直接弹出报告），两个入口都能用。
+* （v2.0 当年失败也是栽在这个返回方式上，不是 opts.policy 本身的问题。）
 *
 * 用法：
-* 1. 把本文件存到「我的 iPhone → Quantumult X → Scripts」文件夹（覆盖旧版即可）；
-* 2. 配置文件 [task_local] 里已有对应一行（tag=AI节点质量检测），不用改；
-* 3. 测单个节点/地区：开着圈X，在节点列表里某个节点或策略组
-* （如「美国节点」「日本节点」「狮城节点」「加拿大节点」组）→ 选「AI节点质量检测」，
-* 报告测的就是那个出口；
-* 想看四个地区，就对四个地区组各长按运行一次，四条通知就是四份结果。
-* 4. 在「工具 → HTTP 请求」里直接点运行 = 测当前「AI服务」选中的出口。
+* - 测单个节点/地区：开着圈X，在节点列表里长按某个节点或策略组
+*   （如「美国节点」「日本节点」「狮城节点」「加拿大节点」组）
+*   → 选「AI节点质量检测」，报告测的就是那个出口，并直接弹出；
+*   想看四个地区，就对四个地区组各长按运行一次。
+* - 在「工具 → HTTP 请求」里直接运行 = 测当前「AI服务」选中的出口。
 *
 * 检测内容：
 * - 出口 IP、城市、运营商、AS，以及 ip-api 的 proxy / hosting 标记（判断 IP 干不干净）
@@ -28,6 +33,14 @@
 var UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
 var TIMEOUT = 15000;
 
+// 长按入口传入的目标（节点名或策略组名）；请求列表直接运行则为空
+var PARAMS = "";
+try {
+var _p = $environment && $environment.params;
+if (typeof _p === "string") PARAMS = _p;
+else if (_p) PARAMS = _p.tag || _p.name || _p.server || "";
+} catch (e) {}
+
 function fetchWithTimeout(opts) {
 return Promise.race([
 $task.fetch(opts),
@@ -38,11 +51,14 @@ setTimeout(function () { reject(new Error("timeout"));}, TIMEOUT);
 }
 
 function get(url) {
-return fetchWithTimeout({
+var req = {
 url: url,
 method: "GET",
 headers: { "User-Agent": UA}
-}).then(function (resp) {
+};
+// 长按指定了目标时，强制每条请求走那个出口（与流媒体解锁查询同做法）
+if (PARAMS) req.opts = { policy: PARAMS};
+return fetchWithTimeout(req).then(function (resp) {
 return { ok: true, status: resp.statusCode, body: resp.body || ""};
 }).catch(function (e) {
 return { ok: false, status: 0, body: "", error: String(e && e.error? e.error: e)};
@@ -57,15 +73,31 @@ return r;
 });
 }
 
-function nodeLabel() {
+// 长按的是策略组时，把组解析成实际命中的节点链，仅用于报告标题（失败就用原名）
+function resolveLabel() {
+if (!PARAMS) return Promise.resolve("");
 try {
-var p = $environment && $environment.params;
-if (!p) return "";
-if (typeof p === "string") return p;
-return p.tag || p.name || p.server || "";
-} catch (e) {
-return "";
+if (typeof $configuration === "undefined" || !$configuration || !$configuration.sendMessage) {
+return Promise.resolve(PARAMS);
 }
+var ipc = $configuration.sendMessage({ action: "get_policy_state", content: PARAMS});
+var guard = new Promise(function (res) { setTimeout(function () { res(null);}, 3000);});
+return Promise.race([ipc, guard]).then(function (r) {
+try {
+if (r && r.ret && r.ret[PARAMS]) {
+var arr = r.ret[PARAMS];
+if (Array.isArray(arr) && arr.length) return PARAMS + " ➟ " + arr.join(" ➟ ");
+}
+} catch (e) {}
+return PARAMS;
+}).catch(function () { return PARAMS;});
+} catch (e) {
+return Promise.resolve(PARAMS);
+}
+}
+
+function esc(s) {
+return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function judgeApi(r) {
@@ -82,15 +114,27 @@ if (r.status === 403) return { icon: "⚠️", text: "网页被风控(403)"};
 return { icon: "⚠️", text: "异常(" + r.status + ")"};
 }
 
+function finish(title, body) {
+console.log(title + "\n" + body);
+$notify(title, "", body);
+var html = "<p style=\"text-align: left; font-family: -apple-system; font-size: medium\">" +
+body.split("\n").map(esc).join("</br>") + "</p>";
+$done({ title: title, htmlMessage: html});
+}
+
 function main() {
-var label = nodeLabel();
+var label = PARAMS;
 var exitIP = "", exitLoc = "";
 var ipInfo = null;
 var probes = null;
 var latSamples = [];
 
-// 1) 出口 IP：chatgpt.com 的 trace 走 AI 分流，拿到的就是被测节点的出口
-return timedGet("https://chatgpt.com/cdn-cgi/trace").then(function (tr) {
+return resolveLabel().then(function (resolved) {
+if (resolved) label = resolved;
+}).then(function () {
+// 1) 出口 IP：chatgpt.com 的 trace（长按时经 opts.policy 走被测出口）
+return timedGet("https://chatgpt.com/cdn-cgi/trace");
+}).then(function (tr) {
 if (tr.ok && tr.body) {
 var mIP = tr.body.match(/ip=([^\n]+)/);
 var mLoc = tr.body.match(/loc=([^\n]+)/);
@@ -108,7 +152,7 @@ exitIP = ipInfo.query || "";
 });
 }
 }).then(function () {
-// 2) 出口 IP 的质量标记（数据库查询，不需要走节点）
+// 2) 出口 IP 的质量标记
 if (exitIP &&!ipInfo) {
 return get("http://ip-api.com/json/" + exitIP + "?lang=zh-CN&fields=status,country,regionName,city,isp,org,as,proxy,hosting,mobile").then(function (r) {
 if (r.ok) {
@@ -205,12 +249,10 @@ else grade = "差 · 多数AI不可用，不建议当AI出口";
 var title = "AI节点质量检测" + (label? " · " + label: "");
 var body = ipLine + latLine + "\n———\n" + lines.join("\n") + "\n———\n综合：" + grade + "（" + pass + "/7 可用）";
 
-console.log(title + "\n" + body);
-$notify(title, "可用 " + pass + "/7 · " + grade, body);
-$done();
+finish(title, body);
 }).catch(function (e) {
-$notify("AI节点质量检测", "脚本出错", String(e));
-$done();
+var title = "AI节点质量检测" + (label? " · " + label: "");
+finish(title, "脚本出错：" + String(e));
 });
 }
 
