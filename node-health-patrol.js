@@ -1,11 +1,11 @@
 /*
 * 节点健康巡检（Quantumult X · cron 脚本）
-* 版本：v2.0（2026-11-14，自动跟随版，取代 v1.0 的固定名单）
+* 版本：v2.1（2026-11-14，健康探测改为 Muse；v2.0 为自动跟随版）
 *
 * 每天 8:00 和 20:00（晚高峰）各巡检一次。巡检对象不再写死：
 * 先读「AI服务」策略组当前选中的节点，你选哪个它就巡哪个——
-* 测它的出口 IP / 延迟 + Claude API 是否通。只在状态变化时通知：
-* - 节点挂了（连不上，或 Claude 不通）
+* 测它的出口 IP / 延迟 + Muse（muse.ai）是否通。只在状态变化时通知：
+* - 节点挂了（连不上，或 Muse 不通）
 * - 节点恢复
 * - 出口 IP 变了（机场换落地要第一时间知道）
 * - 你换了节点：发一份新节点的基线报告，之后盯新节点
@@ -48,11 +48,11 @@ var m = tr.body.match(/ip=([^\n]+)/);
 if (m) ip = m[1].trim();
 }
 if (!ip) return { name: name, ok: false, why: "连不上", ip: "", ms: 0};
-return get("https://api.anthropic.com/v1/models", policy).then(function (r) {
-var claudeOk = r.ok && r.status === 401;
+return get("https://muse.ai/", policy).then(function (r) {
+var museOk = r.ok && r.status === 200;
 return {
-name: name, ok: claudeOk, ip: ip, ms: ms,
-why: claudeOk? "": "Claude异常(" + (r.status || "无响应") + ")"
+name: name, ok: museOk, ip: ip, ms: ms,
+why: museOk? "": "Muse异常(" + (r.status || "无响应") + ")"
 };
 });
 });
